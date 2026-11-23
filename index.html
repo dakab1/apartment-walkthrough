@@ -23,6 +23,11 @@
         margin: 0;
         height: 100%;
         overflow: hidden;
+        overscroll-behavior: none;
+        /* a long press on a phone must not start text selection or the callout menu */
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
         background: #1c1a18;
         color: var(--ink);
         font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -79,6 +84,40 @@
         display: flex;
         gap: 4px;
         padding: 6px;
+      }
+      #pad {
+        display: none; /* touch screens only, see the media query */
+        left: max(20px, env(safe-area-inset-left));
+        bottom: max(28px, env(safe-area-inset-bottom));
+        width: 120px;
+        height: 120px;
+        border-radius: 50%;
+        touch-action: none;
+      }
+      #pad i {
+        position: absolute;
+        inset: 0;
+        margin: auto;
+        width: 52px;
+        height: 52px;
+        border-radius: 50%;
+        background: var(--ink);
+        opacity: 0.8;
+      }
+      @media (pointer: coarse) {
+        #pad {
+          display: block;
+        }
+        /* the bottom of the screen belongs to the thumbs: room buttons move up into one scrolling row */
+        #rooms {
+          top: 74px;
+          bottom: auto;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+        }
+        .seg button {
+          flex: none;
+        }
       }
       #status {
         right: 16px;
@@ -179,6 +218,7 @@
     <div id="status" class="panel busy" role="status"><i></i><span>Loading…</span></div>
     <nav id="rooms" class="panel seg" aria-label="Jump to a room"></nav>
     <div id="quality" class="panel seg" role="group" aria-label="Render quality" hidden></div>
+    <div id="pad" class="panel" aria-label="Walk: push up or down to walk, sideways to turn"><i></i></div>
 
     <div id="intro" class="panel">
       <div>
@@ -192,7 +232,7 @@
           <dt>Shift</dt>
           <dd>walk faster</dd>
           <dt>On a phone</dt>
-          <dd>left thumb walks, right thumb looks</dd>
+          <dd>the round pad walks and turns, drag anywhere else to look</dd>
           <dt>Stair</dt>
           <dd>walk onto its foot, by the right-hand wall, to climb to the loft</dd>
           <dt>Room buttons</dt>
@@ -749,6 +789,8 @@
         return t * DECK + 1.6 - 0.4 * t;
       };
       let lastMove = performance.now();
+      // ms without input before the render starts; longer on touch screens, where gestures come in bursts
+      const STILL = matchMedia("(pointer: coarse)").matches ? 500 : 150;
       let needsReset = true;
       const touched = () => {
         lastMove = performance.now();
@@ -777,48 +819,66 @@
       addEventListener("keyup", (e) => keys.delete(e.code));
       addEventListener("blur", () => keys.clear());
       let drag = null; // the pointer that looks around
-      let stick = null; // touch only: a finger that went down on the left half walks instead
-      const thumb = { fwd: 0, side: 0 };
-      const clamp1 = (v) => THREE.MathUtils.clamp(v, -1, 1);
       canvas.addEventListener("pointerdown", (e) => {
-        const p = { id: e.pointerId, x: e.clientX, y: e.clientY };
-        if (e.pointerType === "touch" && e.clientX < innerWidth / 2 && !stick) stick = p;
-        else {
-          drag = p;
-          canvas.classList.add("dragging");
-        }
+        if (drag) return;
+        // a finger covers less screen than a mouse sweep, so it turns further per pixel
+        drag = { id: e.pointerId, x: e.clientX, y: e.clientY, k: e.pointerType === "touch" ? 0.005 : 0.0035 };
+        canvas.classList.add("dragging");
         canvas.setPointerCapture(e.pointerId);
       });
       canvas.addEventListener("pointermove", (e) => {
-        if (stick?.id === e.pointerId) {
-          thumb.fwd = clamp1((stick.y - e.clientY) / 60); // full speed 60 px from where the thumb landed
-          thumb.side = clamp1((e.clientX - stick.x) / 60);
-          return;
-        }
         if (drag?.id !== e.pointerId) return;
-        me.yaw += (e.clientX - drag.x) * 0.0035;
-        me.pitch = THREE.MathUtils.clamp(me.pitch + (e.clientY - drag.y) * 0.0035, -1.2, 1.2);
+        me.yaw += (e.clientX - drag.x) * drag.k;
+        me.pitch = THREE.MathUtils.clamp(me.pitch + (e.clientY - drag.y) * drag.k, -1.2, 1.2);
         Object.assign(drag, { x: e.clientX, y: e.clientY });
         touched();
       });
       const endDrag = (e) => {
-        if (stick?.id === e.pointerId) {
-          stick = null;
-          thumb.fwd = thumb.side = 0;
-        }
         if (drag?.id !== e.pointerId) return;
         drag = null;
         canvas.classList.remove("dragging");
       };
       canvas.addEventListener("pointerup", endDrag);
       canvas.addEventListener("pointercancel", endDrag);
+
+      // Touch screens: a round pad under the left thumb. Up and down walk, sideways turns,
+      // so one thumb is enough to get around.
+      const pad = document.getElementById("pad");
+      const PAD_R = 40; // px of thumb travel for full speed
+      const thumb = { fwd: 0, turn: 0 };
+      let padId = null;
+      const dead = (v) => (Math.abs(v) < 0.2 ? 0 : v); // a wobbling thumb should not steer
+      const movePad = (e) => {
+        const r = pad.getBoundingClientRect();
+        let dx = e.clientX - (r.left + r.width / 2);
+        let dy = e.clientY - (r.top + r.height / 2);
+        const over = Math.hypot(dx, dy) / PAD_R;
+        if (over > 1) (dx /= over), (dy /= over);
+        pad.firstElementChild.style.translate = `${dx}px ${dy}px`;
+        thumb.fwd = dead(-dy / PAD_R);
+        thumb.turn = dead(-dx / PAD_R);
+      };
+      pad.addEventListener("pointerdown", (e) => {
+        padId = e.pointerId;
+        movePad(e);
+        pad.setPointerCapture(e.pointerId);
+      });
+      pad.addEventListener("pointermove", (e) => e.pointerId === padId && movePad(e));
+      const endPad = (e) => {
+        if (e.pointerId !== padId) return;
+        padId = null;
+        thumb.fwd = thumb.turn = 0;
+        pad.firstElementChild.style.translate = "";
+      };
+      pad.addEventListener("pointerup", endPad);
+      pad.addEventListener("pointercancel", endPad);
       document.getElementById("start").onclick = () => (document.getElementById("intro").hidden = true);
 
       function walk(dt) {
         const k = (...codes) => codes.some((c) => keys.has(c));
-        const turn = (k("ArrowLeft", "KeyQ") ? 1 : 0) - (k("ArrowRight", "KeyE") ? 1 : 0);
+        const turn = (k("ArrowLeft", "KeyQ") ? 1 : 0) - (k("ArrowRight", "KeyE") ? 1 : 0) + thumb.turn;
         const fwd = (k("KeyW", "ArrowUp") ? 1 : 0) - (k("KeyS", "ArrowDown") ? 1 : 0) + thumb.fwd;
-        const side = (k("KeyD") ? 1 : 0) - (k("KeyA") ? 1 : 0) + thumb.side;
+        const side = (k("KeyD") ? 1 : 0) - (k("KeyA") ? 1 : 0);
         if (!turn && !fwd && !side) return;
         me.yaw += turn * 1.8 * dt;
         const step = (k("ShiftLeft", "ShiftRight") ? 3 : 1.6) * dt;
@@ -893,7 +953,7 @@
           setQuality("Full");
         });
         setQuality(quality);
-        const standing = () => performance.now() - lastMove > 150;
+        const standing = () => performance.now() - lastMove > STILL;
         pathTracer.addEventListener("progress", (e) => {
           if (!standing()) return;
           if (e.stage === "denoising") setStatus("Cleaning up the render…", "busy");
@@ -923,7 +983,7 @@
         camera.position.set(me.x, eyeY(), me.z);
         camera.rotation.set(me.pitch, me.yaw, 0);
 
-        const still = performance.now() - lastMove > 150;
+        const still = !drag && padId === null && performance.now() - lastMove > STILL;
         const tracing = pathTracer && still;
         if (tracing && needsReset) {
           pathTracer.updateCamera();

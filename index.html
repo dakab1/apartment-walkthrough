@@ -122,6 +122,7 @@
       #status {
         right: 16px;
         top: 16px;
+        max-width: calc(100vw - 32px);
         padding: 8px 12px;
         font-size: 12px;
         letter-spacing: 0.02em;
@@ -261,14 +262,15 @@
       addEventListener("error", report("error"));
       addEventListener("unhandledrejection", report("error"));
       // A page the browser killed mid-render (out of memory on a phone) reloads with this mark still set.
-      const mark = (on) => {
+      // The mark holds the stage that was running, so the next load can say where it died.
+      const mark = (stage) => {
         try {
-          on ? sessionStorage.setItem("rendering", "1") : sessionStorage.removeItem("rendering");
+          stage ? sessionStorage.setItem("rendering", stage) : sessionStorage.removeItem("rendering");
         } catch {} // storage can be blocked; the page works without the mark
       };
-      let crashed = false;
+      let crashed = null;
       try {
-        crashed = sessionStorage.getItem("rendering") === "1";
+        crashed = sessionStorage.getItem("rendering");
       } catch {}
       mark(false);
       addEventListener("pagehide", () => mark(false));
@@ -923,11 +925,11 @@
       let pathTracer = null;
       // ?preview skips the path tracer (debugging, or a slow GPU)
       const noRender = crashed
-        ? "Preview only · the render stopped this page last time. Reload to try again"
+        ? `Preview only · the render stopped this page last time (${crashed}). Reload to try again`
         : "Preview only · the full render needs a WebGPU browser";
       if (renderer.backend.isWebGPUBackend && !crashed && !new URLSearchParams(location.search).has("preview")) {
         setStatus("Preparing the render…", "busy");
-        mark(true);
+        mark("loading");
         renderer.backend.device.lost.then((e) => (notice = `graphics device lost: ${e.message || e.reason}`));
         const { WebGPUPathTracer, OIDNDenoiser } = await import("three-gpu-pathtracer/webgpu");
         const { initUNetFromBuffer } = await import("oidn-webgpu");
@@ -953,6 +955,13 @@
           targetFrameTime: 24, // ms of GPU work per frame while standing still
           renderScale: 1 / renderer.getPixelRatio(), // one traced pixel per CSS pixel
         });
+        // The tracer keeps a pool of in-flight paths, about 0.9 KB each, and by default doubles it
+        // while frames stay fast: up to 440 MB, which a phone browser answers by killing the page.
+        // Touch devices get a small fixed pool instead (about 110 MB), at some cost in speed.
+        if (matchMedia("(pointer: coarse)").matches) {
+          pathTracer.adaptiveFrameBudget = false;
+          pathTracer.frameBudget = 131072;
+        }
         const denoiser = new OIDNDenoiser({ initUNetFromURL, auxWeightsUrl: WEIGHTS });
         const qualityEl = document.getElementById("quality");
         const setQuality = (name) => {
@@ -982,6 +991,7 @@
         setQuality(quality);
         const standing = () => performance.now() - lastMove > STILL;
         pathTracer.addEventListener("progress", (e) => {
+          mark(e.stage);
           if (!standing()) return;
           if (e.stage === "denoising") setStatus("Cleaning up the render…", "busy");
           else if (e.stage === "rendering" && e.samples.avg < samples)
@@ -1016,7 +1026,7 @@
         const still = !drag && padId === null && performance.now() - lastMove > STILL;
         const tracing = pathTracer && still;
         if (tracing && needsReset) {
-          mark(true);
+          mark("starting");
           pathTracer.updateCamera();
           needsReset = false;
         }

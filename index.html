@@ -251,10 +251,28 @@
 
       const canvas = document.getElementById("view");
       const statusEl = document.getElementById("status");
+      // A failure worth showing: a phone has no console to read it from.
+      let notice = "";
       const setStatus = (text, cls = "") => {
-        statusEl.lastElementChild.textContent = text;
+        statusEl.lastElementChild.textContent = notice ? `${text} · ${notice}` : text;
         statusEl.className = "panel " + cls;
       };
+      const report = (what) => (e) => (notice = `${what}: ${e.reason?.message ?? e.message ?? e.reason ?? "unknown"}`);
+      addEventListener("error", report("error"));
+      addEventListener("unhandledrejection", report("error"));
+      // A page the browser killed mid-render (out of memory on a phone) reloads with this mark still set.
+      const mark = (on) => {
+        try {
+          on ? sessionStorage.setItem("rendering", "1") : sessionStorage.removeItem("rendering");
+        } catch {} // storage can be blocked; the page works without the mark
+      };
+      let crashed = false;
+      try {
+        crashed = sessionStorage.getItem("rendering") === "1";
+      } catch {}
+      mark(false);
+      addEventListener("pagehide", () => mark(false));
+      addEventListener("visibilitychange", () => document.hidden && mark(false));
 
       const renderer = new THREE.WebGPURenderer({ canvas, antialias: true, trackTimestamp: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -904,8 +922,13 @@
       const WEIGHTS = "https://cdn.jsdelivr.net/gh/pissang/oidn-webgpu@v0.6.0/weights/rt_hdr_alb_nrm_small.tza";
       let pathTracer = null;
       // ?preview skips the path tracer (debugging, or a slow GPU)
-      if (renderer.backend.isWebGPUBackend && !new URLSearchParams(location.search).has("preview")) {
+      const noRender = crashed
+        ? "Preview only · the render stopped this page last time. Reload to try again"
+        : "Preview only · the full render needs a WebGPU browser";
+      if (renderer.backend.isWebGPUBackend && !crashed && !new URLSearchParams(location.search).has("preview")) {
         setStatus("Preparing the render…", "busy");
+        mark(true);
+        renderer.backend.device.lost.then((e) => (notice = `graphics device lost: ${e.message || e.reason}`));
         const { WebGPUPathTracer, OIDNDenoiser } = await import("three-gpu-pathtracer/webgpu");
         const { initUNetFromBuffer } = await import("oidn-webgpu");
         // weights come as a binary file, or as base64 text (.txt) where the host serves no binary files
@@ -943,7 +966,10 @@
           const b = document.createElement("button");
           b.textContent = name;
           b.title = name === "Quick" ? "Ready in seconds" : "Most accurate, takes minutes";
-          b.onclick = () => setQuality(name);
+          b.onclick = () => {
+            notice = "";
+            setQuality(name);
+          };
           qualityEl.append(b);
         }
         qualityEl.hidden = false;
@@ -951,6 +977,7 @@
           // no weights (offline, blocked): fall back to rendering the noise away
           console.warn("Denoiser unavailable, switching to the full render:", e.error);
           setQuality("Full");
+          notice = `Quick failed: ${e.error?.message ?? e.error}`;
         });
         setQuality(quality);
         const standing = () => performance.now() - lastMove > STILL;
@@ -960,7 +987,10 @@
           else if (e.stage === "rendering" && e.samples.avg < samples)
             setStatus(`Rendering · ${Math.floor(e.samples.avg)} / ${samples} samples`, "busy");
         });
-        pathTracer.addEventListener("complete", () => standing() && setStatus(`${quality} render`, "done"));
+        pathTracer.addEventListener("complete", () => {
+          mark(false);
+          if (standing()) setStatus(`${quality} render`, "done");
+        });
         pathTracer.setScene(scene, camera);
       }
       // The preview has no walls blocking the sky, so it gets only a little of it.
@@ -986,10 +1016,11 @@
         const still = !drag && padId === null && performance.now() - lastMove > STILL;
         const tracing = pathTracer && still;
         if (tracing && needsReset) {
+          mark(true);
           pathTracer.updateCamera();
           needsReset = false;
         }
-        if (!tracing) setStatus(pathTracer ? "Preview · stand still to render" : "Preview only · the full render needs a WebGPU browser");
+        if (!tracing) setStatus(pathTracer ? "Preview · stand still to render" : noRender);
         // preview underneath until the traced image has fully faded in
         if (!tracing || pathTracer.fadeState < 1) renderer.render(scene, camera);
         if (tracing) pathTracer.renderSample();

@@ -55,7 +55,7 @@
         padding: 6px;
         max-width: calc(100vw - 32px);
       }
-      #rooms button {
+      .seg button {
         font: inherit;
         color: inherit;
         background: transparent;
@@ -64,14 +64,21 @@
         padding: 8px 12px;
         cursor: pointer;
       }
-      #rooms button:hover,
-      #rooms button:focus-visible {
+      .seg button:hover,
+      .seg button:focus-visible {
         background: rgba(42, 38, 34, 0.08);
         outline: none;
       }
-      #rooms button[aria-pressed="true"] {
+      .seg button[aria-pressed="true"] {
         background: var(--ink);
         color: #faf7f2;
+      }
+      #quality {
+        left: 16px;
+        top: 16px;
+        display: flex;
+        gap: 4px;
+        padding: 6px;
       }
       #status {
         right: 16px;
@@ -170,12 +177,13 @@
     <canvas id="view" aria-label="3D view of the apartment"></canvas>
 
     <div id="status" class="panel busy" role="status"><i></i><span>Loading…</span></div>
-    <nav id="rooms" class="panel" aria-label="Jump to a room"></nav>
+    <nav id="rooms" class="panel seg" aria-label="Jump to a room"></nav>
+    <div id="quality" class="panel seg" role="group" aria-label="Render quality" hidden></div>
 
     <div id="intro" class="panel">
       <div>
         <h1>Walk through the studio</h1>
-        <p>Studio with sleeping loft, 29 m² + 18 m². Stand still and the view sharpens into the full render.</p>
+        <p>Studio with sleeping loft, 29 m² + 18 m². Stand still and the view sharpens into a render.</p>
         <dl>
           <dt>W A S D / arrows</dt>
           <dd>walk and turn</dd>
@@ -189,6 +197,8 @@
           <dd>walk onto its foot, by the right-hand wall, to climb to the loft</dd>
           <dt>Room buttons</dt>
           <dd>jump to a spot</dd>
+          <dt>Quick / Full</dt>
+          <dd>a render in seconds, or the most accurate one in minutes</dd>
         </dl>
         <button id="start">Start walking</button>
       </div>
@@ -825,14 +835,17 @@
       }
 
       // ---------- Full render: progressive path tracing whenever you stand still ----------
-      // A short noisy render, then Open Image Denoise cleans it up: seconds instead of minutes.
-      let samples = 32;
+      // Quick: a short noisy render that Open Image Denoise cleans up, seconds per view.
+      // Full: every sample traced with no clean-up, minutes per view.
+      const QUALITY = { Quick: 32, Full: 800 };
+      let quality = "Quick";
+      let samples = QUALITY[quality];
       // the denoiser's network weights (Apache 2.0), 640 KB, fetched on the first clean-up
       const WEIGHTS = "https://cdn.jsdelivr.net/gh/pissang/oidn-webgpu@v0.6.0/weights/rt_hdr_alb_nrm_small.tza";
       let pathTracer = null;
       // ?preview skips the path tracer (debugging, or a slow GPU)
       if (renderer.backend.isWebGPUBackend && !new URLSearchParams(location.search).has("preview")) {
-        setStatus("Preparing the full render…", "busy");
+        setStatus("Preparing the render…", "busy");
         const { WebGPUPathTracer, OIDNDenoiser } = await import("three-gpu-pathtracer/webgpu");
         const { initUNetFromBuffer } = await import("oidn-webgpu");
         // weights come as a binary file, or as base64 text (.txt) where the host serves no binary files
@@ -858,13 +871,28 @@
           renderScale: 1 / renderer.getPixelRatio(), // one traced pixel per CSS pixel
         });
         const denoiser = new OIDNDenoiser({ initUNetFromURL, auxWeightsUrl: WEIGHTS });
+        const qualityEl = document.getElementById("quality");
+        const setQuality = (name) => {
+          quality = name;
+          pathTracer.setDenoiser(name === "Quick" ? denoiser : null);
+          pathTracer.maxSamples = samples = QUALITY[name];
+          [...qualityEl.children].forEach((b) => b.setAttribute("aria-pressed", b.textContent === name));
+          touched();
+        };
+        for (const name in QUALITY) {
+          const b = document.createElement("button");
+          b.textContent = name;
+          b.title = name === "Quick" ? "Ready in seconds" : "Most accurate, takes minutes";
+          b.onclick = () => setQuality(name);
+          qualityEl.append(b);
+        }
+        qualityEl.hidden = false;
         denoiser.addEventListener("error", (e) => {
           // no weights (offline, blocked): fall back to rendering the noise away
-          console.warn("Denoiser unavailable, rendering more samples instead:", e.error);
-          pathTracer.setDenoiser(null);
-          pathTracer.maxSamples = samples = 800;
+          console.warn("Denoiser unavailable, switching to the full render:", e.error);
+          setQuality("Full");
         });
-        pathTracer.setDenoiser(denoiser);
+        setQuality(quality);
         const standing = () => performance.now() - lastMove > 150;
         pathTracer.addEventListener("progress", (e) => {
           if (!standing()) return;
@@ -872,7 +900,7 @@
           else if (e.stage === "rendering" && e.samples.avg < samples)
             setStatus(`Rendering · ${Math.floor(e.samples.avg)} / ${samples} samples`, "busy");
         });
-        pathTracer.addEventListener("complete", () => standing() && setStatus("Full render", "done"));
+        pathTracer.addEventListener("complete", () => standing() && setStatus(`${quality} render`, "done"));
         pathTracer.setScene(scene, camera);
       }
       // The preview has no walls blocking the sky, so it gets only a little of it.
@@ -901,7 +929,7 @@
           pathTracer.updateCamera();
           needsReset = false;
         }
-        if (!tracing) setStatus(pathTracer ? "Preview · stand still for the full render" : "Preview only · the full render needs a WebGPU browser");
+        if (!tracing) setStatus(pathTracer ? "Preview · stand still to render" : "Preview only · the full render needs a WebGPU browser");
         // preview underneath until the traced image has fully faded in
         if (!tracing || pathTracer.fadeState < 1) renderer.render(scene, camera);
         if (tracing) pathTracer.renderSample();
